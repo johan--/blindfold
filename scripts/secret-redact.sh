@@ -4,9 +4,9 @@ set -uo pipefail
 
 REGISTRY="$HOME/.claude/secrets-registry.json"
 
-INPUT=$(cat)
+INPUT=$(</dev/stdin)
 
-PARSED=$(echo "$INPUT" | jq -r '[.tool_name // "", .tool_result.stdout // .tool_result // ""] | @tsv' 2>/dev/null)
+PARSED=$(jq -r '[.tool_name // "", .tool_result.stdout // .tool_result // ""] | @tsv' <<< "$INPUT" 2>/dev/null)
 TOOL_NAME="${PARSED%%	*}"
 TOOL_RESULT="${PARSED#*	}"
 

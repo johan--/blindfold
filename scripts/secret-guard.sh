@@ -25,7 +25,7 @@ deny() {
 }
 
 # --- .env file blocking (applies to both Bash and Read) ---
-# Single jq call: returns paths if any profiles exist, empty output if none
+# jq filter duplicated from lib.sh:get_all_env_paths -- intentional to avoid sourcing lib.sh on hot path
 if [[ -f "$REGISTRY" ]]; then
   ENV_PATHS=$(jq -r '
     [.global.envProfiles | values // empty] +
