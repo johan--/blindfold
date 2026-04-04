@@ -6,12 +6,16 @@ A Claude Code plugin that keeps your secrets out of the LLM's context window. AP
 
 When you paste an API key into a chat or run a command that echoes a token, the LLM sees it. That value sits in the context window for the rest of the conversation -- it can leak into logs, suggestions, or tool calls.
 
-Blindfold sits between the LLM and your secrets. It works in four parts:
+Blindfold sits between the LLM and your secrets. On macOS, it wraps every Bash command Claude runs in a Seatbelt sandbox (`sandbox-exec`) that denies the `com.apple.SecurityServer` Mach IPC service. This is a kernel-level block. Obfuscating the command doesn't help because the block isn't inspecting the command string.
 
-1. A skill (SKILL.md) tells the LLM to never read secret values directly
-2. A PreToolUse hook blocks commands that would output secrets before they run (like `security find-generic-password -w`)
-3. A wrapper script (`secret-exec.sh`) resolves secrets in a subprocess and strips values from output before the LLM gets it back
-4. A PostToolUse hook scans command output for leaked values after the fact, as a safety net
+Four moving parts:
+
+1. A PreToolUse hook intercepts Bash commands and wraps them in the Seatbelt sandbox before execution.
+2. `secret-exec.sh` runs outside the sandbox (it needs keychain access), reads secret values, injects them as env vars, then runs the user command inside the sandbox. Output is redacted before Claude reads it back.
+3. A skill file (SKILL.md) tells the LLM to use the wrapper for anything needing secrets.
+4. A PostToolUse hook scans output for leaked values as a safety net.
+
+On Linux, falls back to string matching. bubblewrap support planned.
 
 ## Installation
 
@@ -163,6 +167,7 @@ blindfold/
 │   └── hooks.json          # Auto-registered guard + redaction hooks
 ├── scripts/
 │   ├── lib.sh              # Shared functions (backend detection, registry ops)
+│   ├── sandbox.sb          # macOS Seatbelt profile (denies keychain Mach IPC)
 │   ├── secret-store.sh     # Store via native dialog or terminal prompt
 │   ├── secret-list.sh      # List names, never values
 │   ├── secret-delete.sh    # Remove from keychain + registry
@@ -178,18 +183,22 @@ blindfold/
 
 ## Security model
 
-Storage goes through a native OS dialog -- the value travels from your keyboard to the keychain without touching the LLM context. Execution happens in a subprocess, and output is redacted before the LLM reads it. Direct reads of the keychain or registered `.env` files are blocked by a PreToolUse hook. If something still leaks through a different path, the PostToolUse hook catches it.
+On macOS, every Bash command Claude runs goes through a Seatbelt sandbox that blocks `com.apple.SecurityServer` at the kernel level. The sandbox denies the Mach IPC call that all keychain access goes through. Doesn't matter if the command is a direct `security` call, a Python subprocess, a base64-decoded script, or a temp file. The block is below the shell.
 
-The registry file (`~/.claude/secrets-registry.json`) stores secret names and env profile file paths. Never values.
+`secret-exec.sh` is the only way to reach secrets. It runs outside the sandbox, reads from the keychain, sets env vars, then runs the actual command inside the sandbox. Output gets redacted before Claude sees it.
+
+Storing a secret goes through a native OS dialog on your machine. The value goes from your keyboard to the keychain. Claude sees "OK: stored." The registry file only has secret names and env profile paths. No values.
+
+On Linux, the guard hook falls back to string matching since Seatbelt is macOS only. bubblewrap support is planned.
 
 ## Limitations
 
-- On macOS, `security add-generic-password` passes the value as a CLI argument, briefly visible in `ps` output. The exposure window is very short, but on shared systems, consider storing secrets from your own terminal.
-- The GPG fallback on Linux uses symmetric encryption with a passphrase prompt. For better security, install `secret-tool` with GNOME Keyring.
-- Output redaction is string-based. Secrets shorter than 4 characters won't be redacted to avoid false positives.
-- The PreToolUse hook matches command patterns. Someone could bypass it by obfuscating commands, but the hook prevents the LLM from accidentally reading secrets, not a determined human.
+- On macOS, enforcement is kernel-level via Seatbelt. On Linux, it falls back to string matching, which can be bypassed by obfuscating commands. bubblewrap support is planned.
+- `security add-generic-password` on macOS passes the value as a CLI argument, briefly visible in `ps`. Short exposure window, but on shared systems you may want to store secrets from your own terminal.
+- The GPG fallback on Linux uses symmetric encryption with a passphrase prompt. `secret-tool` with GNOME Keyring is more secure if available.
+- Output redaction is string-based. Secrets shorter than 4 characters won't be redacted (too many false positives).
 - `.env` parsing handles `KEY=VALUE` and `KEY="VALUE"`. Multi-line values and shell expansions aren't supported.
-- If the script is killed with `SIGKILL` (kill -9), temp files containing secrets may persist in `/tmp/`. Under normal termination, the trap cleans them up.
+- If the process is killed with SIGKILL, temp files with secrets may persist in `/tmp/`. Normal termination cleans them up.
 
 ## License
 
